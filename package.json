@@ -1,0 +1,20 @@
+{
+  "name": "clearwell",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Payment orchestration and double-entry ledger engine with a simulated PSP",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}
