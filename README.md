@@ -32,8 +32,11 @@ Payment orchestration + double-entry ledger engine.
 | Milestone | State |
 | --- | --- |
 | M0 Environment & repo | ✅ done |
-| M1 Skeleton, migrations, merchants, API-key auth, error handling | 🚧 in progress (1.1–1.4 done) |
-| M2+ | pending |
+| M1 Skeleton, migrations, merchants, API-key auth, error handling | ✅ done |
+| M2 Double-entry ledger core | ✅ done |
+| M3 State machine + PSP simulator + PspClient adapter | ✅ done |
+| M4 Authorize/capture/void/refund wired to ledger | ✅ done (ledger posting lives in the same transaction as the status change) |
+| M5+ | pending |
 
 ## Local setup
 
@@ -87,6 +90,62 @@ All errors use one envelope:
 | POST | `/v1/merchants` | — | bootstrap a merchant + first (owner) API key |
 | GET | `/v1/merchants/me` | API key | current tenant, derived from the key |
 | POST | `/v1/merchants/me/api-keys` | API key + `admin:keys` | issue another key |
+| GET | `/v1/accounts` | API key + `ledger:read` | accounts with derived balances |
+| GET | `/v1/accounts/{id}/ledger` | API key + `ledger:read` | statement, keyset paginated |
+| POST | `/v1/payments` | API key + `payments:write` | create + authorize |
+| GET | `/v1/payments`, `/v1/payments/{id}` | API key + `payments:read` | read |
+| GET | `/v1/payments/{id}/events` | API key + `payments:read` | append-only audit trail |
+| POST | `/v1/payments/{id}/capture` | API key + `payments:write` | capture (full or partial) |
+| POST | `/v1/payments/{id}/void` | API key + `payments:write` | void an authorization |
+| POST | `/v1/payments/{id}/refunds` | API key + `refunds:write` | refund (full or partial) |
+
+### Provider timeout semantics
+
+A timeout is **not** a decline. When the provider does not answer in time the payment becomes
+`UNKNOWN` and the API answers `202` with `state: "PENDING_CONFIRMATION"`:
+
+```json
+{ "status": "UNKNOWN", "state": "PENDING_CONFIRMATION",
+  "message": "The provider did not confirm in time. This payment is NOT declined; …" }
+```
+
+The client must **poll** (or wait for the webhook), never resubmit — resubmitting is how a
+double charge happens. The payment is resolved later by a status inquiry using our own
+reference, which the provider kept as its idempotency key.
+
+## PSP simulator (a separate process)
+
+The simulator is a real HTTP server with its own state. It is *not* part of the API.
+
+```bash
+npm run psp                       # listens on :4000
+```
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /psp/authorize` | authorize; `fault: approve \| decline \| timeout \| latency` |
+| `POST /psp/capture`, `/psp/void`, `/psp/refund` | lifecycle, idempotent per `our_reference` |
+| `GET /psp/payments/{ourReference}` | status inquiry — the recovery sweeper's lifeline |
+| `GET /psp/settlement?date=YYYY-MM-DD` | CSV: `psp_ref,our_payment_id,amount,currency,status,settled_at` |
+| `POST /psp/_faults` | global latency / decline_next / timeout_next / duplicate_callbacks / out_of_order_callbacks |
+| `POST /psp/_flush-callbacks` | deliver queued callbacks (optionally duplicated/reordered) |
+| `POST /psp/_reset` | wipe state |
+
+## The ledger in one table
+
+Capture of a gross amount `G` (fee `F` = floor(2% · G), net `N` = G − F):
+
+| Account | Type | Direction | Amount |
+| --- | --- | --- | --- |
+| `PSP_CLEARING` | ASSET | DEBIT | G |
+| `MERCHANT_PAYABLE` | LIABILITY | CREDIT | N |
+| `FEE_REVENUE` | REVENUE | CREDIT | F |
+
+Refund of `R` (reversal `Q` = proportional share of the fee) is the exact mirror, which is why
+a fully refunded payment nets every account back to zero.
+
+Balances are **derived** from `ledger_entries` through the `account_balances` view, never stored,
+so they cannot drift from the history.
 
 ### API key format
 
