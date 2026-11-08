@@ -40,7 +40,9 @@ Clearwell is a production-grade payment orchestration and double-entry ledger en
 - **Milestone 2 (M2)**: Ledger Core with Balanced-Entry Enforcement (Completed) ✅
 - **Milestone 3 (M3)**: Payment State Machine & PSP Simulator (Completed) ✅
 - **Milestone 4 (M4)**: Authorize, Capture, Void, Refund Wired to Ledger (Completed) ✅
-- **Milestone 5 (M5)**: Idempotency Layer & Conflict Handling (Next)
+- **Milestone 5 (M5)**: Idempotency Layer & Conflict Handling (Completed) ✅
+- **Milestone 6 (M6)**: Merchant Payouts & Concurrency Control (Completed) ✅
+- **Milestone 7 (M7)**: Timeout Recovery Sweeper & Circuit Breaker (Next)
 
 ---
 

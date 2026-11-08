@@ -5,6 +5,7 @@ import { NotFoundError } from "./modules/common/errors";
 import { merchantRouter } from "./modules/merchant/merchant.routes";
 import { ledgerRouter } from "./modules/ledger/ledger.routes";
 import { paymentRouter } from "./modules/payment/payment.routes";
+import { payoutRouter } from "./modules/payment/payout.routes";
 
 export function createApp(): Express {
   const app = express();
@@ -27,6 +28,7 @@ export function createApp(): Express {
   app.use("/v1/accounts", ledgerRouter);
   app.use("/v1/ledger", ledgerRouter);
   app.use("/v1/payments", paymentRouter);
+  app.use("/v1/payouts", payoutRouter);
 
   // 404 handler for unknown routes
   app.use((req, res, next) => {
