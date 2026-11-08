@@ -3,6 +3,7 @@ import { correlationIdMiddleware } from "./modules/common/middleware/correlation
 import { errorHandler } from "./modules/common/middleware/errorHandler";
 import { NotFoundError } from "./modules/common/errors";
 import { merchantRouter } from "./modules/merchant/merchant.routes";
+import { ledgerRouter } from "./modules/ledger/ledger.routes";
 
 export function createApp(): Express {
   const app = express();
@@ -22,6 +23,8 @@ export function createApp(): Express {
 
   // API v1 routes
   app.use("/v1/merchants", merchantRouter);
+  app.use("/v1/accounts", ledgerRouter);
+  app.use("/v1/ledger", ledgerRouter);
 
   // 404 handler for unknown routes
   app.use((req, res, next) => {
