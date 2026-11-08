@@ -5,6 +5,7 @@ import { asyncHandler } from "./modules/common/async-handler";
 import { correlationId } from "./modules/common/correlation";
 import { errorHandler, notFoundHandler } from "./modules/common/error-handler";
 import type { Logger } from "./modules/common/logger";
+import { createLedgerRouter } from "./modules/ledger/ledger.routes";
 import { createMerchantRouter } from "./modules/merchant/merchant.routes";
 
 export type AppDeps = {
@@ -58,10 +59,9 @@ export function createApp(deps: AppDeps): Express {
     }),
   );
 
-  app.use(
-    "/v1",
-    createMerchantRouter({ pool, logger, apiKeyHashSecret: deps.apiKeyHashSecret }),
-  );
+  const routerDeps = { pool, logger, apiKeyHashSecret: deps.apiKeyHashSecret };
+  app.use("/v1", createMerchantRouter(routerDeps));
+  app.use("/v1", createLedgerRouter(routerDeps));
 
   app.use(notFoundHandler);
   app.use(errorHandler(logger));
