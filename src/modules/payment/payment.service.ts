@@ -252,7 +252,13 @@ export class PaymentService {
     });
 
     // ---------- TX2: ledger + status + event, atomically ----------
-    return withTransaction(this.pool, async (client) => {
+    //
+    // IMPORTANT: this transaction COMMITS even when the provider refused, because
+    // the revert to AUTHORIZED and the audit event are themselves facts that must
+    // be durable. We therefore return a result object and throw the HTTP error
+    // AFTER the commit. (Throwing inside withTransaction would roll the revert
+    // back and strand the payment in CAPTURE_PENDING -- a real bug this test caught.)
+    const result = await withTransaction(this.pool, async (client) => {
       const repo = new PaymentRepository(client);
       const locked = await repo.lockById(paymentId, merchantId);
       if (!locked) throw AppError.internal("payment disappeared during capture");
@@ -303,7 +309,7 @@ export class PaymentService {
           outcome: "SUCCESS",
           latencyMs: outcome.latencyMs,
         });
-        return toPaymentResponse(updated);
+        return { ok: true as const, payment: toPaymentResponse(updated) };
       }
 
       // Decline / timeout / error: revert to AUTHORIZED (the gap-fix edge) so
@@ -338,14 +344,24 @@ export class PaymentService {
         outcome: outcome.kind === "DECLINED" ? "DECLINED" : outcome.kind,
         latencyMs: outcome.latencyMs,
       });
+      return { ok: false as const, paymentId: updated.id, status: updated.status };
+    });
 
-      if (outcome.kind === "DECLINED") {
-        throw AppError.unprocessable(`Capture declined by provider: ${outcome.message}`, "PROVIDER_ERROR");
-      }
-      throw Object.assign(
-        AppError.unprocessable("Provider did not confirm the capture, retry shortly", "PROVIDER_TIMEOUT"),
-        { statusCode: 504 },
-      );
+    if (result.ok) return result.payment;
+
+    // The revert is committed; only now do we turn it into an HTTP error.
+    if (outcome.kind === "DECLINED") {
+      throw AppError.providerError(`Capture declined by provider: ${outcome.message}`, {
+        payment_id: result.paymentId,
+        status: result.status,
+      });
+    }
+    // Timeout/error: the payment is back in AUTHORIZED and can be retried. The
+    // provider call used our reference as its idempotency key, so a retry cannot
+    // capture twice even if the first call actually succeeded.
+    throw AppError.providerTimeout("The provider did not confirm the capture; retry is safe", {
+      payment_id: result.paymentId,
+      status: result.status,
     });
   }
 
@@ -372,7 +388,7 @@ export class PaymentService {
       pspRef: prepared.psp_ref ?? prepared.psp_reference,
     });
 
-    return withTransaction(this.pool, async (client) => {
+    const voided = await withTransaction(this.pool, async (client) => {
       const repo = new PaymentRepository(client);
       const locked = await repo.lockById(paymentId, merchantId);
       if (!locked) throw AppError.internal("payment disappeared during void");
@@ -397,7 +413,9 @@ export class PaymentService {
         return toPaymentResponse(updated);
       }
 
-      // Void failed: the payment stays AUTHORIZED, nothing changed.
+      // Void failed: the payment stays AUTHORIZED, nothing changed. The audit
+      // event is committed BEFORE this transaction ends, so the error is thrown
+      // by the caller (see throwAfter: never inside withTransaction).
       await repo.appendEvent({
         paymentId: locked.id,
         merchantId,
@@ -407,11 +425,18 @@ export class PaymentService {
         detail: { outcome: outcome.kind },
         ...(ctx.correlationId ? { correlationId: ctx.correlationId } : {}),
       });
-      throw AppError.unprocessable(
-        outcome.kind === "DECLINED" ? outcome.message : "Provider did not confirm the void",
-        "PROVIDER_ERROR",
-      );
+      return null;
     });
+
+    if (voided) return voided;
+    // The VOID_FAILED event is committed; now report it to the client.
+    if (outcome.kind === "DECLINED") {
+      throw AppError.providerError(outcome.message, { payment_id: paymentId });
+    }
+    throw AppError.providerTimeout(
+      "The provider did not confirm the void; the authorization is unchanged",
+      { payment_id: paymentId },
+    );
   }
 
   // ----------------------------------------------------------------- refund
@@ -461,7 +486,7 @@ export class PaymentService {
       amount: prepared.requested,
     });
 
-    return withTransaction(this.pool, async (client) => {
+    const settled = await withTransaction(this.pool, async (client) => {
       const repo = new PaymentRepository(client);
       const locked = await repo.lockById(paymentId, merchantId);
       if (!locked) throw AppError.internal("payment disappeared during refund");
@@ -488,15 +513,8 @@ export class PaymentService {
           },
           ...(ctx.correlationId ? { correlationId: ctx.correlationId } : {}),
         });
-        if (outcome.kind === "TIMEOUT") {
-          throw AppError.providerTimeout("Provider did not answer the refund; it will be confirmed", {
-            payment_id: locked.id,
-            pending_minor: prepared.requested.toString(),
-          });
-        }
-        throw AppError.providerError(
-          outcome.kind === "DECLINED" ? outcome.message : "Provider rejected the refund",
-        );
+        // Return instead of throwing: the audit event above must survive.
+        return { failed: true as const, kind: outcome.kind, message: outcome.kind === "DECLINED" ? outcome.message : undefined };
       }
 
       const captured = BigInt(locked.captured_amount);
@@ -555,7 +573,20 @@ export class PaymentService {
         latencyMs: outcome.latencyMs,
       });
 
-      return toPaymentResponse(updated);
+      return { failed: false as const, payment: toPaymentResponse(updated) };
+    });
+
+    if (!settled.failed) return settled.payment;
+    // The failure audit event and the reservation release are committed; now
+    // translate the provider outcome into the HTTP contract.
+    if (settled.kind === "TIMEOUT") {
+      throw AppError.providerTimeout("Provider did not answer the refund; it will be confirmed", {
+        payment_id: paymentId,
+        pending_minor: dto.amount_minor.toString(),
+      });
+    }
+    throw AppError.providerError(settled.message ?? "Provider rejected the refund", {
+      payment_id: paymentId,
     });
   }
 

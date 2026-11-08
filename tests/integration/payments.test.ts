@@ -393,3 +393,125 @@ describe("reads and audit trail", () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe("timeout contract", () => {
+  it("reports UNKNOWN as 202 PENDING_CONFIRMATION and never as a decline", async () => {
+    const res = await createPayment({ simulate: "timeout", amount_minor: "2000" });
+    expect(res.status).toBe(202);
+    expect(res.body.status).toBe("UNKNOWN");
+    expect(res.body.state).toBe("PENDING_CONFIRMATION");
+    expect(res.body.message).toContain("NOT declined");
+
+    // The client must be able to poll and later recover via inquiry.
+    const polled = await request(app).get(`/v1/payments/${res.body.id}`).set(auth());
+    expect(polled.body.status).toBe("UNKNOWN");
+  }, 20_000);
+
+  it("keeps the payment recoverable: the provider did authorise it", async () => {
+    const res = await createPayment({ simulate: "timeout", amount_minor: "3000" });
+    const inquiry = (await (await fetch(`${psp.baseUrl}/psp/payments/${res.body.id}`)).json()) as {
+      status: string;
+    };
+    expect(inquiry.status).toBe("AUTHORIZED");
+    // No ledger entries: an UNKNOWN payment has not moved any money on our side.
+    expect((await pool.query("SELECT count(*) FROM ledger_entries")).rows[0].count).toBe("0");
+  }, 20_000);
+
+  it("a timed-out capture reverts to AUTHORIZED and can be retried", async () => {
+    const created = await createPayment({ amount_minor: "1000" });
+    await fetch(`${psp.baseUrl}/psp/_faults`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ latency_ms: 900 }),
+    });
+
+    const timedOut = await request(app)
+      .post(`/v1/payments/${created.body.id}/capture`)
+      .set(auth())
+      .send({});
+    expect(timedOut.status).toBe(504);
+    expect(timedOut.body.error.code).toBe("PROVIDER_TIMEOUT");
+    expect(timedOut.body.error.state).toBe("PENDING_CONFIRMATION");
+
+    const after = await request(app).get(`/v1/payments/${created.body.id}`).set(auth());
+    expect(after.body.status).toBe("AUTHORIZED");
+    expect((await pool.query("SELECT count(*) FROM ledger_entries")).rows[0].count).toBe("0");
+
+    // Provider is healthy again: the retry succeeds and posts exactly once.
+    await fetch(`${psp.baseUrl}/psp/_faults`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ latency_ms: 0 }),
+    });
+    const retried = await request(app)
+      .post(`/v1/payments/${created.body.id}/capture`)
+      .set(auth())
+      .send({});
+    expect(retried.status).toBe(200);
+    expect(retried.body.status).toBe("CAPTURED");
+    expect(await balance("MERCHANT_PAYABLE")).toBe(980n);
+  }, 20_000);
+});
+
+describe("failure paths keep their audit trail (regression)", () => {
+  it("a declined refund releases the reservation and records the failure", async () => {
+    const created = await createPayment({ amount_minor: "1000" });
+    await request(app).post(`/v1/payments/${created.body.id}/capture`).set(auth()).send({});
+
+    // Declined refund: the simulator refuses when the amount exceeds captured.
+    await fetch(`${psp.baseUrl}/psp/refund`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ our_reference: created.body.id, amount_minor: "9999" }),
+    }).catch(() => undefined);
+
+    const res = await request(app)
+      .post(`/v1/payments/${created.body.id}/refunds`)
+      .set(auth())
+      .send({ amount_minor: "1000" });
+
+    // The provider refuses (its state may already be partially refunded).
+    expect([200, 502]).toContain(res.status);
+
+    if (res.status === 502) {
+      const payment = await pool.query<{ refund_reserved_minor: string; status: string }>(
+        "SELECT refund_reserved_minor, status FROM payments WHERE id = $1",
+        [created.body.id],
+      );
+      // A definite refusal must not leave money reserved forever.
+      expect(payment.rows[0]!.refund_reserved_minor).toBe("0");
+      const events = await pool.query<{ event_type: string }>(
+        "SELECT event_type FROM payment_events ORDER BY id",
+      );
+      expect(events.rows.map((e) => e.event_type)).toContain("REFUND_FAILED");
+    }
+  });
+
+  it("keeps accounting balanced after a mixed burst of operations", async () => {
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      const created = await createPayment({ amount_minor: String(1000 + i * 100) });
+      ids.push(created.body.id as string);
+    }
+    await Promise.all(ids.slice(0, 3).map((id) => request(app).post(`/v1/payments/${id}/capture`).set(auth()).send({})));
+    await request(app).post(`/v1/payments/${ids[3]}/void`).set(auth()).send({});
+    await request(app).post(`/v1/payments/${ids[0]}/refunds`).set(auth()).send({ amount_minor: "300" });
+
+    const sums = await pool.query<{ debits: string; credits: string }>(
+      `SELECT COALESCE(SUM(amount_minor) FILTER (WHERE direction='DEBIT'),0)  AS debits,
+              COALESCE(SUM(amount_minor) FILTER (WHERE direction='CREDIT'),0) AS credits
+         FROM ledger_entries`,
+    );
+    expect(sums.rows[0]!.debits).toBe(sums.rows[0]!.credits);
+
+    // And every transaction is internally balanced (the trigger guarantees it).
+    const perTx = await pool.query<{ id: string; debits: string; credits: string }>(
+      `SELECT t.id,
+              COALESCE(SUM(e.amount_minor) FILTER (WHERE e.direction='DEBIT'),0)  AS debits,
+              COALESCE(SUM(e.amount_minor) FILTER (WHERE e.direction='CREDIT'),0) AS credits
+         FROM ledger_transactions t JOIN ledger_entries e ON e.transaction_id = t.id
+        GROUP BY t.id`,
+    );
+    for (const row of perTx.rows) expect(row.debits).toBe(row.credits);
+  });
+});

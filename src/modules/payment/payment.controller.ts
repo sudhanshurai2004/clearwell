@@ -24,10 +24,22 @@ export class PaymentController {
         correlationId: req.correlationId,
         ...(req.header("idempotency-key") ? { idempotencyKey: req.header("idempotency-key") as string } : {}),
       });
-      // 201 only when we actually created something new in a settled state.
-      // A PENDING_CONFIRMATION payment is reported as 202: accepted, not done.
-      const status = payment.status === "UNKNOWN" ? 202 : 201;
-      res.status(status).json(payment);
+      // A provider timeout is NOT a failure to create the payment: we accepted
+      // it, we simply do not know yet whether the charge happened.
+      //   202 Accepted + state PENDING_CONFIRMATION
+      // The client must poll /v1/payments/:id (or wait for the webhook) instead
+      // of retrying, because retrying could create a second charge.
+      if (payment.status === "UNKNOWN") {
+        res.status(202).json({
+          ...payment,
+          state: "PENDING_CONFIRMATION",
+          message:
+            "The provider did not confirm in time. This payment is NOT declined; " +
+            "its outcome will be resolved by status inquiry. Do not resubmit.",
+        });
+        return;
+      }
+      res.status(201).json(payment);
     });
 
   get = (): RequestHandler =>
