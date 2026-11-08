@@ -57,6 +57,7 @@ function respond(res: Response, req: Request, appError: AppError): void {
       ...(appError.details && appError.details.length > 0
         ? { details: appError.details }
         : {}),
+      ...(appError.meta ?? {}),
     },
   });
 }

@@ -7,12 +7,16 @@ import { errorHandler, notFoundHandler } from "./modules/common/error-handler";
 import type { Logger } from "./modules/common/logger";
 import { createLedgerRouter } from "./modules/ledger/ledger.routes";
 import { createMerchantRouter } from "./modules/merchant/merchant.routes";
+import { createPaymentRouter } from "./modules/payment/payment.routes";
+import type { PspClient } from "./modules/payment/psp/psp-client";
 
 export type AppDeps = {
   readonly logger: Logger;
   readonly pool: Pool;
   readonly apiKeyHashSecret: string;
   readonly nodeEnv?: "development" | "test" | "production";
+  /** Provider adapter. Tests inject a fake; production uses HttpPspClient. */
+  readonly pspClient: PspClient;
 };
 
 /**
@@ -59,9 +63,15 @@ export function createApp(deps: AppDeps): Express {
     }),
   );
 
-  const routerDeps = { pool, logger, apiKeyHashSecret: deps.apiKeyHashSecret };
+  const routerDeps = {
+    pool,
+    logger,
+    apiKeyHashSecret: deps.apiKeyHashSecret,
+    pspClient: deps.pspClient,
+  };
   app.use("/v1", createMerchantRouter(routerDeps));
   app.use("/v1", createLedgerRouter(routerDeps));
+  app.use("/v1", createPaymentRouter(routerDeps));
 
   app.use(notFoundHandler);
   app.use(errorHandler(logger));

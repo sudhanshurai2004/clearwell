@@ -2,7 +2,10 @@ import { readFileSync } from "node:fs";
 import type { Express } from "express";
 import pg from "pg";
 import { createApp } from "../../src/app";
+import type { PspOutcome } from "../../src/modules/payment/psp/psp-client";
 import { createLogger } from "../../src/modules/common/logger";
+import { HttpPspClient } from "../../src/modules/payment/psp/http-psp-client";
+import type { PspClient } from "../../src/modules/payment/psp/psp-client";
 
 export const TEST_API_KEY_SECRET = "test-api-key-hash-secret";
 
@@ -47,19 +50,77 @@ export type TestApp = {
 };
 
 /**
+ * A fake PspClient whose behaviour each test controls. Used where the point of
+ * the test is OUR logic (state machine, ledger sums) rather than the network.
+ */
+export class ScriptedPspClient implements PspClient {
+  public calls: string[] = [];
+  public authorizeOutcome: PspOutcome<{ pspRef: string; status: "AUTHORIZED" | "DECLINED"; declineCode?: string }> = {
+    kind: "SUCCESS",
+    data: { pspRef: "psp_test_1", status: "AUTHORIZED" },
+    raw: {},
+    latencyMs: 1,
+  };
+  public captureOutcome: PspOutcome<{ pspRef: string; capturedAmount: bigint; status: "CAPTURED" }> = {
+    kind: "SUCCESS",
+    data: { pspRef: "psp_test_1", capturedAmount: 0n, status: "CAPTURED" },
+    raw: {},
+    latencyMs: 1,
+  };
+  public refundOutcome: PspOutcome<{ refundedAmount: bigint; status: "REFUNDED" | "PARTIALLY_REFUNDED" }> = {
+    kind: "SUCCESS",
+    data: { refundedAmount: 0n, status: "PARTIALLY_REFUNDED" },
+    raw: {},
+    latencyMs: 1,
+  };
+  public voidOutcome: PspOutcome<{ status: "VOIDED" }> = { kind: "SUCCESS", data: { status: "VOIDED" }, raw: {}, latencyMs: 1 };
+
+  async authorize(request: { amount: bigint }) {
+    this.calls.push(`authorize:${request.amount}`);
+    return this.authorizeOutcome;
+  }
+  async capture(request: { amount: bigint }) {
+    this.calls.push(`capture:${request.amount}`);
+    return this.captureOutcome;
+  }
+  async void() {
+    this.calls.push("void");
+    return this.voidOutcome;
+  }
+  async refund(request: { amount: bigint }) {
+    this.calls.push(`refund:${request.amount}`);
+    return this.refundOutcome;
+  }
+  async inquire() {
+    this.calls.push("inquire");
+    return { kind: "ERROR" as const, message: "not implemented", latencyMs: 1 };
+  }
+}
+
+/**
  * Builds the real Express app against the real test database. No route is
  * faked -- these are integration tests, which is the only way an idempotency
  * or locking bug shows up.
  */
-export async function createTestApp(): Promise<TestApp> {
+export async function createTestApp(options: { pspClient?: PspClient } = {}): Promise<TestApp> {
   const url = await resolveTestDatabaseUrl();
   const pool = new pg.Pool({ connectionString: url, max: 5 });
   const logger = createLogger("silent", false);
+  // Default: a provider that always approves instantly. Suites that care about
+  // provider behaviour pass their own real simulator harness instead.
+  const pspClient =
+    options.pspClient ??
+    (new HttpPspClient({
+      baseUrl: "http://127.0.0.1:9", // unreachable on purpose; replaced per suite
+      timeoutMs: 50,
+      logger,
+    }) as unknown as PspClient);
   const app = createApp({
     logger,
     pool,
     apiKeyHashSecret: TEST_API_KEY_SECRET,
     nodeEnv: "test",
+    pspClient,
   });
   return {
     app,

@@ -27,18 +27,22 @@ export class AppError extends Error {
   readonly status: number;
   readonly code: ErrorCode;
   readonly details?: readonly ErrorDetail[];
+  /** Extra fields merged into the error envelope (e.g. the payment's state). */
+  readonly meta?: Readonly<Record<string, unknown>>;
 
   constructor(
     status: number,
     code: ErrorCode,
     message: string,
     details?: readonly ErrorDetail[],
+    meta?: Readonly<Record<string, unknown>>,
   ) {
     super(message);
     this.name = "AppError";
     this.status = status;
     this.code = code;
     this.details = details;
+    this.meta = meta;
   }
 
   static validation(details: readonly ErrorDetail[], message = "Request validation failed") {
@@ -65,5 +69,24 @@ export class AppError extends Error {
   }
   static internal(message = "An unexpected error occurred") {
     return new AppError(500, "INTERNAL_ERROR", message);
+  }
+
+  /**
+   * The provider did not answer in time.
+   *
+   * 504 + PROVIDER_TIMEOUT, and crucially NOT a decline. The envelope carries
+   * the payment's state so the client understands nothing was lost: the charge
+   * is "pending confirmation" and will be resolved by status inquiry.
+   */
+  static providerTimeout(message: string, meta?: Record<string, unknown>) {
+    return new AppError(504, "PROVIDER_TIMEOUT", message, undefined, {
+      state: "PENDING_CONFIRMATION",
+      ...meta,
+    });
+  }
+
+  /** The provider answered with a failure (5xx, bad state, etc). */
+  static providerError(message: string, meta?: Record<string, unknown>) {
+    return new AppError(502, "PROVIDER_ERROR", message, undefined, meta);
   }
 }
