@@ -10,11 +10,34 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "db:migrate": "node-pg-migrate up -m migrations --migrations-table schema_migrations",
+    "db:migrate:down": "node-pg-migrate down -m migrations --migrations-table schema_migrations",
+    "db:create": "node-pg-migrate create -m migrations --migrations-table schema_migrations",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "test:watch": "vitest"
   },
   "devDependencies": {
+    "@testcontainers/postgresql": "^12.2.1",
+    "@types/express": "^5.0.6",
     "@types/node": "^22.0.0",
+    "@types/pg": "^8.23.1",
+    "@types/supertest": "^7.2.1",
+    "pino-pretty": "^13.2.0",
+    "supertest": "^7.3.2",
     "tsx": "^4.0.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "vitest": "^5.1.0"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.9",
+    "express": "^5.3.0",
+    "node-pg-migrate": "^9.0.0",
+    "pg": "^8.23.1",
+    "pino": "^9.14.0",
+    "pino-http": "^10.5.0",
+    "zod": "^4.6.7"
   }
 }
