@@ -27,6 +27,9 @@ export function createApp(deps: AppDeps): Express {
   const { logger, pool } = deps;
   const app = express();
   app.set("nodeEnv", deps.nodeEnv ?? "development");
+  // Available to middleware (e.g. idempotency) without threading it through
+  // every signature. Same instance the routes use.
+  app.set("pool", pool);
 
   app.disable("x-powered-by");
   app.set("trust proxy", true);

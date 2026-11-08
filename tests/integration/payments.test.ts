@@ -39,20 +39,31 @@ beforeEach(async () => {
 });
 
 const auth = () => ({ authorization: `Bearer ${apiKey}` });
-const createPayment = (body: Record<string, unknown> = {}) =>
-  request(app)
-    .post("/v1/payments")
-    .set(auth())
-    .send({ amount_minor: "1000", currency: "USD", ...body });
 
-const balance = async (code: string): Promise<bigint> => {
+/** Every mutating call needs an Idempotency-Key, so tests must send one. */
+let keyCounter = 0;
+const idem = () => ({ "idempotency-key": `test-key-${Date.now()}-${(keyCounter += 1)}` });
+const post = (path: string) => request(app).post(path).set(auth()).set(idem());
+const createPayment = (body: Record<string, unknown> = {}) =>
+  post("/v1/payments").send({ amount_minor: "1000", currency: "USD", ...body });
+
+/**
+ * Reads a balance for THIS merchant/currency. The currency filter is essential:
+ * system accounts exist per currency, and an ORDER BY ... LIMIT 1 without it
+ * silently returns whichever row the planner happens to pick (a real flake this
+ * suite hit -- it read the INR fee account and reported 0).
+ */
+const balance = async (code: string, currency = "USD"): Promise<bigint> => {
   const res = await pool.query<{ balance_minor: string }>(
     `SELECT balance_minor FROM account_balances
-      WHERE (code = $1 AND merchant_id IS NULL) OR (code = $1 AND merchant_id = $2)
-      ORDER BY is_system DESC LIMIT 1`,
-    [code, merchantId],
+      WHERE code = $1 AND currency = $2
+        AND (merchant_id = $3 OR (merchant_id IS NULL AND is_system))
+      ORDER BY merchant_id NULLS LAST
+      LIMIT 1`,
+    [code, currency, merchantId],
   );
-  return BigInt(res.rows[0]?.balance_minor ?? "0");
+  if (res.rows.length === 0) throw new Error(`no account ${code}/${currency} for merchant ${merchantId}`);
+  return BigInt(res.rows[0]!.balance_minor);
 };
 
 describe("authorize", () => {
@@ -149,6 +160,7 @@ describe("authorize", () => {
     const readOnly = await request(app)
       .post("/v1/merchants/me/api-keys")
       .set(auth())
+      .set(idem())
       .send({ label: "ro", scopes: ["payments:read"] });
     const res = await request(app)
       .post("/v1/payments")
@@ -166,7 +178,7 @@ describe("capture", () => {
 
   it("captures an authorized payment, posting the ledger in the same transaction", async () => {
     const payment = await authorize("1050");
-    const res = await request(app).post(`/v1/payments/${payment.id}/capture`).set(auth()).send({});
+    const res = await post(`/v1/payments/${payment.id}/capture`).send({});
 
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("CAPTURED");
@@ -185,10 +197,7 @@ describe("capture", () => {
 
   it("supports a partial capture and leaves the rest authorized", async () => {
     const payment = await authorize("1000");
-    const res = await request(app)
-      .post(`/v1/payments/${payment.id}/capture`)
-      .set(auth())
-      .send({ amount_minor: "400" });
+    const res = await post(`/v1/payments/${payment.id}/capture`).send({ amount_minor: "400" });
     expect(res.status).toBe(200);
     expect(res.body.captured_amount_minor).toBe("400");
     expect(res.body.authorized_amount_minor).toBe("1000");
@@ -197,18 +206,15 @@ describe("capture", () => {
 
   it("rejects capturing more than authorized", async () => {
     const payment = await authorize("1000");
-    const res = await request(app)
-      .post(`/v1/payments/${payment.id}/capture`)
-      .set(auth())
-      .send({ amount_minor: "1001" });
+    const res = await post(`/v1/payments/${payment.id}/capture`).send({ amount_minor: "1001" });
     expect(res.status).toBe(422);
     expect(res.body.error.message).toContain("exceeds the authorised");
   });
 
   it("rejects capturing twice (double capture is impossible)", async () => {
     const payment = await authorize("1000");
-    expect((await request(app).post(`/v1/payments/${payment.id}/capture`).set(auth()).send({})).status).toBe(200);
-    const second = await request(app).post(`/v1/payments/${payment.id}/capture`).set(auth()).send({});
+    expect((await post(`/v1/payments/${payment.id}/capture`).send({})).status).toBe(200);
+    const second = await post(`/v1/payments/${payment.id}/capture`).send({});
     expect(second.status).toBe(409);
     expect(second.body.error.code).toBe("CONFLICT");
     expect(second.body.error.message).toContain("Illegal payment transition");
@@ -218,8 +224,8 @@ describe("capture", () => {
   it("only lets ONE of two simultaneous captures win", async () => {
     const payment = await authorize("1000");
     const results = await Promise.all([
-      request(app).post(`/v1/payments/${payment.id}/capture`).set(auth()).send({}),
-      request(app).post(`/v1/payments/${payment.id}/capture`).set(auth()).send({}),
+      post(`/v1/payments/${payment.id}/capture`).send({}),
+      post(`/v1/payments/${payment.id}/capture`).send({}),
     ]);
     const statuses = results.map((r) => r.status).sort();
     expect(statuses).toEqual([200, 409]);
@@ -230,7 +236,7 @@ describe("capture", () => {
 
   it("requires the payment to be authorized", async () => {
     const res = await createPayment({ simulate: "decline" });
-    const capture = await request(app).post(`/v1/payments/${res.body.id}/capture`).set(auth()).send({});
+    const capture = await post(`/v1/payments/${res.body.id}/capture`).send({});
     expect(capture.status).toBe(409);
   });
 
@@ -242,6 +248,7 @@ describe("capture", () => {
     const res = await request(app)
       .post(`/v1/payments/${payment.id}/capture`)
       .set("authorization", `Bearer ${other.body.apiKey.api_key}`)
+      .set(idem())
       .send({});
     expect(res.status).toBe(404);
     expect(res.body.error.code).toBe("NOT_FOUND");
@@ -251,7 +258,7 @@ describe("capture", () => {
 describe("void", () => {
   it("voids an authorized payment and writes no ledger entries", async () => {
     const created = await createPayment();
-    const res = await request(app).post(`/v1/payments/${created.body.id}/void`).set(auth()).send({});
+    const res = await post(`/v1/payments/${created.body.id}/void`).send({});
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("VOIDED");
     expect((await pool.query("SELECT count(*) FROM ledger_entries")).rows[0].count).toBe("0");
@@ -259,8 +266,8 @@ describe("void", () => {
 
   it("cannot void a captured payment", async () => {
     const created = await createPayment();
-    await request(app).post(`/v1/payments/${created.body.id}/capture`).set(auth()).send({});
-    const res = await request(app).post(`/v1/payments/${created.body.id}/void`).set(auth()).send({});
+    await post(`/v1/payments/${created.body.id}/capture`).send({});
+    const res = await post(`/v1/payments/${created.body.id}/void`).send({});
     expect(res.status).toBe(409);
   });
 });
@@ -268,16 +275,13 @@ describe("void", () => {
 describe("refunds", () => {
   const captured = async (amount = "1000") => {
     const created = await createPayment({ amount_minor: amount });
-    await request(app).post(`/v1/payments/${created.body.id}/capture`).set(auth()).send({});
+    await post(`/v1/payments/${created.body.id}/capture`).send({});
     return created.body.id as string;
   };
 
   it("refunds fully, reversing the fee, and nets every account to zero", async () => {
     const id = await captured("1000");
-    const res = await request(app)
-      .post(`/v1/payments/${id}/refunds`)
-      .set(auth())
-      .send({ amount_minor: "1000" });
+    const res = await post(`/v1/payments/${id}/refunds`).send({ amount_minor: "1000" });
 
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("REFUNDED");
@@ -292,6 +296,7 @@ describe("refunds", () => {
     const res = await request(app)
       .post(`/v1/payments/${id}/refunds`)
       .set(auth())
+      .set(idem())
       .send({ amount_minor: "400" });
 
     expect(res.body.status).toBe("PARTIALLY_REFUNDED");
@@ -303,27 +308,21 @@ describe("refunds", () => {
 
   it("refunds cannot exceed the captured amount", async () => {
     const id = await captured("1000");
-    const res = await request(app)
-      .post(`/v1/payments/${id}/refunds`)
-      .set(auth())
-      .send({ amount_minor: "1001" });
+    const res = await post(`/v1/payments/${id}/refunds`).send({ amount_minor: "1001" });
     expect(res.status).toBe(422);
   });
 
   it("cannot refund an authorized-only payment", async () => {
     const created = await createPayment();
-    const res = await request(app)
-      .post(`/v1/payments/${created.body.id}/refunds`)
-      .set(auth())
-      .send({ amount_minor: "100" });
+    const res = await post(`/v1/payments/${created.body.id}/refunds`).send({ amount_minor: "100" });
     expect(res.status).toBe(409);
   });
 
   it("blocks concurrent refunds that would together exceed the captured amount", async () => {
     const id = await captured("1000");
     const results = await Promise.all([
-      request(app).post(`/v1/payments/${id}/refunds`).set(auth()).send({ amount_minor: "600" }),
-      request(app).post(`/v1/payments/${id}/refunds`).set(auth()).send({ amount_minor: "600" }),
+      post(`/v1/payments/${id}/refunds`).send({ amount_minor: "600" }),
+      post(`/v1/payments/${id}/refunds`).send({ amount_minor: "600" }),
     ]);
 
     const ok = results.filter((r) => r.status === 200);
@@ -344,8 +343,8 @@ describe("refunds", () => {
 
   it("supports repeated partial refunds up to the captured amount", async () => {
     const id = await captured("1000");
-    await request(app).post(`/v1/payments/${id}/refunds`).set(auth()).send({ amount_minor: "400" });
-    await request(app).post(`/v1/payments/${id}/refunds`).set(auth()).send({ amount_minor: "600" });
+    await post(`/v1/payments/${id}/refunds`).send({ amount_minor: "400" });
+    await post(`/v1/payments/${id}/refunds`).send({ amount_minor: "600" });
 
     const final = await request(app).get(`/v1/payments/${id}`).set(auth());
     expect(final.body.status).toBe("REFUNDED");
@@ -374,7 +373,7 @@ describe("reads and audit trail", () => {
 
   it("exposes the full event history, and it is append-only", async () => {
     const created = await createPayment();
-    await request(app).post(`/v1/payments/${created.body.id}/capture`).set(auth()).send({});
+    await post(`/v1/payments/${created.body.id}/capture`).send({});
 
     const res = await request(app).get(`/v1/payments/${created.body.id}/events`).set(auth());
     expect(res.body.events.map((e: { event_type: string }) => e.event_type)).toEqual([
@@ -425,10 +424,7 @@ describe("timeout contract", () => {
       body: JSON.stringify({ latency_ms: 900 }),
     });
 
-    const timedOut = await request(app)
-      .post(`/v1/payments/${created.body.id}/capture`)
-      .set(auth())
-      .send({});
+    const timedOut = await post(`/v1/payments/${created.body.id}/capture`).send({});
     expect(timedOut.status).toBe(504);
     expect(timedOut.body.error.code).toBe("PROVIDER_TIMEOUT");
     expect(timedOut.body.error.state).toBe("PENDING_CONFIRMATION");
@@ -443,10 +439,7 @@ describe("timeout contract", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ latency_ms: 0 }),
     });
-    const retried = await request(app)
-      .post(`/v1/payments/${created.body.id}/capture`)
-      .set(auth())
-      .send({});
+    const retried = await post(`/v1/payments/${created.body.id}/capture`).send({});
     expect(retried.status).toBe(200);
     expect(retried.body.status).toBe("CAPTURED");
     expect(await balance("MERCHANT_PAYABLE")).toBe(980n);
@@ -456,7 +449,7 @@ describe("timeout contract", () => {
 describe("failure paths keep their audit trail (regression)", () => {
   it("a declined refund releases the reservation and records the failure", async () => {
     const created = await createPayment({ amount_minor: "1000" });
-    await request(app).post(`/v1/payments/${created.body.id}/capture`).set(auth()).send({});
+    await post(`/v1/payments/${created.body.id}/capture`).send({});
 
     // Declined refund: the simulator refuses when the amount exceeds captured.
     await fetch(`${psp.baseUrl}/psp/refund`, {
@@ -465,10 +458,7 @@ describe("failure paths keep their audit trail (regression)", () => {
       body: JSON.stringify({ our_reference: created.body.id, amount_minor: "9999" }),
     }).catch(() => undefined);
 
-    const res = await request(app)
-      .post(`/v1/payments/${created.body.id}/refunds`)
-      .set(auth())
-      .send({ amount_minor: "1000" });
+    const res = await post(`/v1/payments/${created.body.id}/refunds`).send({ amount_minor: "1000" });
 
     // The provider refuses (its state may already be partially refunded).
     expect([200, 502]).toContain(res.status);
@@ -493,9 +483,9 @@ describe("failure paths keep their audit trail (regression)", () => {
       const created = await createPayment({ amount_minor: String(1000 + i * 100) });
       ids.push(created.body.id as string);
     }
-    await Promise.all(ids.slice(0, 3).map((id) => request(app).post(`/v1/payments/${id}/capture`).set(auth()).send({})));
-    await request(app).post(`/v1/payments/${ids[3]}/void`).set(auth()).send({});
-    await request(app).post(`/v1/payments/${ids[0]}/refunds`).set(auth()).send({ amount_minor: "300" });
+    await Promise.all(ids.slice(0, 3).map((id) => post(`/v1/payments/${id}/capture`).send({})));
+    await post(`/v1/payments/${ids[3]}/void`).send({});
+    await post(`/v1/payments/${ids[0]}/refunds`).send({ amount_minor: "300" });
 
     const sums = await pool.query<{ debits: string; credits: string }>(
       `SELECT COALESCE(SUM(amount_minor) FILTER (WHERE direction='DEBIT'),0)  AS debits,
