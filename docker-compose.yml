@@ -14,7 +14,54 @@ services:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-clearwell} -d ${POSTGRES_DB:-clearwell}"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: clearwell-api
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: ${PORT:-3000}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://clearwell:clearwell_dev_password@db:5432/clearwell}
+      API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET:-change-me-in-production}
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      PSP_CALLBACK_SECRET: ${PSP_CALLBACK_SECRET:-change-me-in-production}
+      WEBHOOK_SIGNING_SECRET: ${WEBHOOK_SIGNING_SECRET:-change-me-in-production}
+    ports:
+      - "${PORT:-3000}:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+    command: sh -c "npx node-pg-migrate up && npm run start"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:3000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  psp-simulator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: clearwell-psp-simulator
+    environment:
+      PORT: ${PSP_PORT:-3001}
+      NODE_ENV: ${NODE_ENV:-development}
+      PSP_PORT: ${PSP_PORT:-3001}
+    ports:
+      - "${PSP_PORT:-3001}:3001"
+    command: ["node", "dist/psp-simulator-server.js"]
+
+  webhook-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: clearwell-webhook-worker
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+    command: ["node", "dist/webhook-worker.js"]
 
 volumes:
   clearwell-pgdata:

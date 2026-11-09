@@ -179,6 +179,35 @@ export class PaymentRepository {
       updatedAt: r.updated_at,
     };
   }
+
+  async findByStatus(
+    status: PaymentStatus,
+    limit = 25,
+    executor: DbExecutor = pool
+  ): Promise<Payment[]> {
+    const sql = `
+      SELECT id, merchant_id, amount, currency, status, authorized_amount, captured_amount, refunded_amount, psp_ref, version, created_at, updated_at
+      FROM payments
+      WHERE status = $1
+      ORDER BY updated_at ASC
+      LIMIT $2
+    `;
+    const res = await executor.query(sql, [status, limit]);
+    return res.rows.map((r) => ({
+      id: r.id,
+      merchantId: r.merchant_id,
+      amount: r.amount,
+      currency: r.currency,
+      status: r.status,
+      authorizedAmount: r.authorized_amount,
+      capturedAmount: r.captured_amount,
+      refundedAmount: r.refunded_amount,
+      pspRef: r.psp_ref,
+      version: r.version,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    }));
+  }
 }
 
 export const paymentRepository = new PaymentRepository();

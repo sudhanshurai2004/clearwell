@@ -6,14 +6,17 @@ import { PaymentStateMachine } from "./payment.state-machine";
 import { PspClient, defaultPspClient } from "./psp/psp.client";
 import { LedgerService, ledgerService } from "../ledger/ledger.service";
 import { CreatePaymentInput, PaymentResponseDto } from "./payment.dtos";
-import { Payment } from "./payment.types";
+import { Payment, PaymentStatus } from "./payment.types";
+import { createPspStatusBreaker } from "../common/circuitBreaker";
+import { RiskService } from "../risk/risk.service";
 
 export class PaymentService {
   constructor(
     private readonly paymentRepo: PaymentRepository = paymentRepository,
     private readonly pspClient: PspClient = defaultPspClient,
     private readonly ledger: LedgerService = ledgerService,
-    private readonly dbPool: Pool = pool
+    private readonly dbPool: Pool = pool,
+    private readonly riskService: RiskService = new RiskService()
   ) {}
 
   private mapToDto(p: Payment): PaymentResponseDto {
@@ -60,6 +63,35 @@ export class PaymentService {
         { amount: input.amount, currency: input.currency },
         client1
       );
+
+      const riskAssessment = this.riskService.evaluate({
+        merchantId,
+        paymentId: payment.id,
+        amount,
+        currency: input.currency,
+        recentAuthorizationCount: 0,
+      });
+
+      if (!riskAssessment.allowed) {
+        PaymentStateMachine.assertValidPaymentTransition("CREATED", "RISK_REJECTED", payment.id);
+        payment = await this.paymentRepo.updatePaymentState(
+          payment.id,
+          "CREATED",
+          "RISK_REJECTED",
+          {},
+          client1
+        );
+        await this.paymentRepo.recordEvent(
+          payment.id,
+          "CREATED",
+          "RISK_REJECTED",
+          "RISK_REJECTED",
+          { code: riskAssessment.code, reason: riskAssessment.reason },
+          client1
+        );
+        await client1.query("COMMIT");
+        return this.mapToDto(payment);
+      }
 
       // 2. Transition CREATED -> AUTH_PENDING
       PaymentStateMachine.assertValidPaymentTransition("CREATED", "AUTH_PENDING", payment.id);
@@ -491,6 +523,81 @@ export class PaymentService {
     }
 
     return this.mapToDto(updatedPayment);
+  }
+
+  async recoverUnknownPayments(
+    limit = 25
+  ): Promise<{ scanned: number; recovered: number; failed: number; paymentIds: string[] }> {
+    const unknownPayments = await this.paymentRepo.findByStatus("UNKNOWN", limit);
+    const breaker = createPspStatusBreaker((ourReference: string) =>
+      this.pspClient.statusInquiry(ourReference)
+    );
+
+    let recovered = 0;
+    let failed = 0;
+    const paymentIds: string[] = [];
+
+    for (const payment of unknownPayments) {
+      try {
+        const inquiry = await breaker.fire(payment.id);
+        if (!inquiry) {
+          continue;
+        }
+
+        const resolvedStatus: PaymentStatus =
+          inquiry.status === "DECLINED" || inquiry.status === "VOIDED" ? "DECLINED" : "AUTHORIZED";
+
+        const client = await this.dbPool.connect();
+        try {
+          await client.query("BEGIN");
+
+          PaymentStateMachine.assertValidPaymentTransition("UNKNOWN", resolvedStatus, payment.id);
+
+          const updatedPayment = await this.paymentRepo.updatePaymentState(
+            payment.id,
+            "UNKNOWN",
+            resolvedStatus,
+            {
+              authorizedAmount: resolvedStatus === "AUTHORIZED" ? payment.amount : undefined,
+              pspRef: inquiry.pspReference || payment.pspRef || undefined,
+            },
+            client
+          );
+
+          await this.paymentRepo.recordEvent(
+            payment.id,
+            "UNKNOWN",
+            resolvedStatus,
+            resolvedStatus === "AUTHORIZED" ? "AUTH_RECOVERED" : "AUTH_DECLINED_RECOVERED",
+            {
+              pspRef: inquiry.pspReference,
+              status: inquiry.status,
+              amount: inquiry.amount,
+              currency: inquiry.currency,
+            },
+            client
+          );
+
+          await client.query("COMMIT");
+          recovered += 1;
+          paymentIds.push(updatedPayment.id);
+        } catch (err) {
+          await client.query("ROLLBACK");
+          throw err;
+        } finally {
+          client.release();
+        }
+      } catch (err) {
+        failed += 1;
+      }
+    }
+
+    return {
+      scanned: unknownPayments.length,
+      recovered,
+      failed,
+      paymentIds,
+    };
   }
 
   async getPaymentById(merchantId: string, paymentId: string): Promise<PaymentResponseDto> {

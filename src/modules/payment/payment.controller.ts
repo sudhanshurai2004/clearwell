@@ -79,6 +79,20 @@ export class PaymentController {
       next(err);
     }
   };
+
+  recoverUnknownPayments = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const rawLimit = Number(req.query.limit ?? 25);
+      const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 100) : 25;
+      const result = await this.service.recoverUnknownPayments(limit);
+      res.status(200).json({
+        status: "OK",
+        ...result,
+      });
+    } catch (err) {
+      next(err);
+    }
+  };
 }
 
 export const paymentController = new PaymentController();

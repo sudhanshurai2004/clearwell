@@ -14,6 +14,31 @@ describe("Express App Foundation & Middleware", () => {
     expect(res.headers["x-correlation-id"]).toBe(res.body.correlation_id);
   });
 
+  it("should show a readable health status page in browsers", async () => {
+    const res = await request(app).get("/health").set("Accept", "text/html");
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/html");
+    expect(res.text).toContain("API is healthy");
+  });
+
+  it("should keep machine-readable health JSON available to monitoring", async () => {
+    const res = await request(app).get("/health?format=json").set("Accept", "text/html");
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("ok");
+    expect(res.headers["content-type"]).toContain("application/json");
+  });
+
+  it("should show an API landing page at GET /", async () => {
+    const res = await request(app).get("/");
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/html");
+    expect(res.text).toContain("Clearwell API");
+    expect(res.text).toContain("not a merchant dashboard");
+  });
+
   it("should propagate client provided x-correlation-id", async () => {
     const customCorrelationId = "test-corr-id-12345";
     const res = await request(app)

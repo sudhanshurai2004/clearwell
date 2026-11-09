@@ -9,6 +9,7 @@ export const paymentRouter = Router();
 paymentRouter.use(authenticateApiKey);
 
 paymentRouter.post("/", idempotencyMiddleware(), paymentController.create);
+paymentRouter.post("/recovery/sweep", paymentController.recoverUnknownPayments);
 paymentRouter.get("/:id", paymentController.getById);
 paymentRouter.post("/:id/capture", idempotencyMiddleware(), paymentController.capture);
 paymentRouter.post("/:id/void", idempotencyMiddleware(), paymentController.voidPayment);
