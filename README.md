@@ -132,3 +132,7 @@ npm run docker:down
 - Browser status page: `http://localhost:3000/health`
 - Machine-readable health JSON: `http://localhost:3000/health?format=json`
 - PSP simulator health: `http://localhost:3001/health`
+
+### Free-host deployment
+
+See [DEPLOYMENT.md](./DEPLOYMENT.md). The repository includes a Render blueprint and GitHub Actions CI. Provider account authorization is required before a public HTTPS URL can be created.
