@@ -64,13 +64,26 @@ export class PaymentService {
         client1
       );
 
+      const recentResult = await client1.query(
+        `SELECT COUNT(*)::int AS count
+         FROM payments
+         WHERE merchant_id=$1
+           AND status IN ('AUTHORIZED','CAPTURE_PENDING','CAPTURED','PARTIALLY_REFUNDED')
+           AND updated_at > NOW() - INTERVAL '1 hour'`,
+        [merchantId]
+      );
       const riskAssessment = this.riskService.evaluate({
         merchantId,
         paymentId: payment.id,
         amount,
         currency: input.currency,
-        recentAuthorizationCount: 0,
+        recentAuthorizationCount: recentResult.rows?.[0]?.count ?? 0,
       });
+      await client1.query(
+        `INSERT INTO risk_decisions (merchant_id,payment_id,allowed,code,reason,amount,currency)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [merchantId, payment.id, riskAssessment.allowed, riskAssessment.code, riskAssessment.reason ?? null, amount, input.currency]
+      );
 
       if (!riskAssessment.allowed) {
         PaymentStateMachine.assertValidPaymentTransition("CREATED", "RISK_REJECTED", payment.id);
@@ -523,6 +536,11 @@ export class PaymentService {
     }
 
     return this.mapToDto(updatedPayment);
+  }
+
+  async listPayments(merchantId: string, limit = 100): Promise<PaymentResponseDto[]> {
+    const payments = await this.paymentRepo.findByMerchant(merchantId, limit);
+    return payments.map((payment) => this.mapToDto(payment));
   }
 
   async recoverUnknownPayments(

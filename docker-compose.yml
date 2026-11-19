@@ -61,7 +61,17 @@ services:
     container_name: clearwell-webhook-worker
     environment:
       NODE_ENV: ${NODE_ENV:-development}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://clearwell:clearwell_dev_password@db:5432/clearwell}
+      API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET:-change-me-in-production}
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      PSP_CALLBACK_SECRET: ${PSP_CALLBACK_SECRET:-change-me-in-production}
+      WEBHOOK_SIGNING_SECRET: ${WEBHOOK_SIGNING_SECRET:-change-me-in-production}
     command: ["node", "dist/webhook-worker.js"]
+    depends_on:
+      db:
+        condition: service_healthy
+      api:
+        condition: service_healthy
 
 volumes:
   clearwell-pgdata:

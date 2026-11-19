@@ -30,13 +30,12 @@ describe("Express App Foundation & Middleware", () => {
     expect(res.headers["content-type"]).toContain("application/json");
   });
 
-  it("should show an API landing page at GET /", async () => {
+  it("should show the Clearwell web dashboard at GET /", async () => {
     const res = await request(app).get("/");
 
     expect(res.status).toBe(200);
     expect(res.headers["content-type"]).toContain("text/html");
-    expect(res.text).toContain("Clearwell API");
-    expect(res.text).toContain("not a merchant dashboard");
+    expect(res.text).toContain("Clearwell Dashboard");
   });
 
   it("should propagate client provided x-correlation-id", async () => {

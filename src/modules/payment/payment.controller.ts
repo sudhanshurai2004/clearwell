@@ -40,6 +40,17 @@ export class PaymentController {
     }
   };
 
+  list = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const limitValue = Number(req.query.limit ?? 100);
+      const limit = Number.isFinite(limitValue) ? Math.min(Math.max(limitValue, 1), 100) : 100;
+      const result = await this.service.listPayments(req.merchant.id, limit);
+      res.status(200).json(result);
+    } catch (err) {
+      next(err);
+    }
+  };
+
   capture = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;

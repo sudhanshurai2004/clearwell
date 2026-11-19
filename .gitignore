@@ -3,5 +3,6 @@ dist/
 .env
 *.log
 coverage/
+public/
 .DS_Store
 Thumbs.db

@@ -10,6 +10,7 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
+    "jsx": "react-jsx",
     "sourceMap": true
   },
   "include": ["src"],

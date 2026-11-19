@@ -12,6 +12,8 @@ const envSchema = z.object({
   PSP_CALLBACK_SECRET: z.string().default("change-me-in-production"),
   WEBHOOK_SIGNING_SECRET: z.string().default("change-me-in-production"),
   PSP_PORT: z.coerce.number().optional(),
+  WORKER_POLL_INTERVAL_MS: z.coerce.number().default(30000),
+  RECOVERY_POLL_INTERVAL_MS: z.coerce.number().default(60000),
 });
 
 const parsed = envSchema.safeParse(process.env);

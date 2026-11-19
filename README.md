@@ -2,7 +2,7 @@
 
 > **Disclaimer**: Clearwell uses a **simulated provider (PSP Simulator)** built specifically for testing distributed payment edge cases, network drops, provider timeouts, and out-of-order webhooks. No real money or real cardholder data is processed. A real sandbox provider (e.g. Stripe, PayPal) can be plugged in behind the identical adapter interface.
 
-Clearwell is a payment-orchestration learning project built with **Node.js 22, TypeScript (strict), Express, and PostgreSQL 16**. It is not production-ready and must not be used to process real payments.
+Clearwell is a payment-orchestration learning project built with **Node.js 22, TypeScript (strict), React, Express, and PostgreSQL 16**. It includes a merchant dashboard, but must not be used to process real payments.
 
 ---
 
@@ -47,6 +47,15 @@ Clearwell is a payment-orchestration learning project built with **Node.js 22, T
 - **Milestone 9 (M9)**: Risk and settlement comparison prototypes added; persistent velocity checks and scheduled reconciliation remain.
 - **Milestone 10 (M10)**: Local Docker Compose stack and health checks added; production observability and deployment hardening remain.
 - **Milestone 11 (M11)**: Local deployment smoke-tested; CI/CD, production secrets, backups, alerting, and production rollout remain.
+
+### Dashboard
+
+Open `http://localhost:3000` to use the React merchant dashboard:
+- onboard a sandbox merchant
+- store the generated API key in browser local storage
+- create simulated authorizations
+- capture, void, and refund payments
+- view recent payments and account metrics
 
 ### Project limitations
 
